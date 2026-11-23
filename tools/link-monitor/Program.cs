@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.IO.Ports;
 using System.Text;
@@ -18,6 +19,8 @@ internal sealed class MonitorForm : Form
     private readonly ComboBox _ports = new();
     private readonly Button _refreshButton = new();
     private readonly Button _connectButton = new();
+    private readonly Button _syntheticButton = new();
+    private readonly System.Windows.Forms.Timer _syntheticTimer = new();
     private readonly Label _usbStatus = new();
     private readonly Label _linkStatus = new();
     private readonly Label _counts = new();
@@ -30,6 +33,8 @@ internal sealed class MonitorForm : Form
     private DateTime _lastReportUtc = DateTime.MinValue;
     private DateTime _connectedUtc = DateTime.MinValue;
     private bool _sawMasterReport;
+    private bool _syntheticTestRunning;
+    private ushort _syntheticSequence;
     private string _latestLinkStatus = "منتظر گزارش فریمور مادر";
 
     public MonitorForm()
@@ -45,6 +50,8 @@ internal sealed class MonitorForm : Form
         _timer.Interval = 500;
         _timer.Tick += (_, _) => CheckConnectionState();
         _timer.Start();
+        _syntheticTimer.Interval = 20;
+        _syntheticTimer.Tick += (_, _) => SendSyntheticTestFrame();
         FormClosing += (_, _) => Disconnect();
     }
 
@@ -82,6 +89,11 @@ internal sealed class MonitorForm : Form
         _connectButton.Width = 95;
         _connectButton.Click += (_, _) => ToggleConnection();
         toolbar.Controls.Add(_connectButton);
+        _syntheticButton.Text = "شروع آزمون ساختگی";
+        _syntheticButton.AutoSize = true;
+        _syntheticButton.Enabled = false;
+        _syntheticButton.Click += (_, _) => ToggleSyntheticTest();
+        toolbar.Controls.Add(_syntheticButton);
         root.Controls.Add(toolbar, 0, 0);
 
         var statusPanel = new TableLayoutPanel
@@ -113,7 +125,7 @@ internal sealed class MonitorForm : Form
         statusPanel.Controls.Add(_rtt, 0, 3);
         statusPanel.Controls.Add(new Label
         {
-            Text = "این ابزار فقط گزارش تشخیصی لینک UART را می‌خواند؛ ورودی موس/صفحه‌کلید را ضبط یا ارسال نمی‌کند.",
+            Text = "دکمهٔ آزمون فقط فریم ساختگی می‌فرستد؛ ورودی واقعی موس/صفحه‌کلید ضبط یا ارسال نمی‌شود.",
             AutoSize = true,
             ForeColor = System.Drawing.Color.DimGray,
             Margin = new Padding(0, 5, 0, 0)
@@ -194,6 +206,7 @@ internal sealed class MonitorForm : Form
             _connectButton.Text = "قطع اتصال";
             _ports.Enabled = false;
             _refreshButton.Enabled = false;
+            _syntheticButton.Enabled = true;
             SetUsbStatus($"USB: به {portName} وصل است", System.Drawing.Color.DarkGreen);
             SetLinkStatus(_latestLinkStatus, System.Drawing.Color.DimGray);
             AppendLog($"--- اتصال به {portName} با 115200 baud ---");
@@ -205,6 +218,101 @@ internal sealed class MonitorForm : Form
                 "خطای اتصال COM", MessageBoxButtons.OK, MessageBoxIcon.Error);
             Disconnect();
         }
+    }
+
+    private void ToggleSyntheticTest()
+    {
+        if (_syntheticTestRunning)
+        {
+            StopSyntheticTest(true);
+            return;
+        }
+        if (_serial is null || !_serial.IsOpen)
+        {
+            MessageBox.Show(this, "ابتدا به پورت COM پیکوی مادر وصل شوید.", "اتصال لازم است", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        _syntheticSequence = 0;
+        _syntheticTestRunning = true;
+        _syntheticButton.Text = "توقف آزمون";
+        AppendLog("--- آزمون دستی فریم ساختگی آغاز شد؛ ورودی واقعی خوانده نمی‌شود ---");
+        _syntheticTimer.Start();
+    }
+
+    private void StopSyntheticTest(bool writeLog)
+    {
+        bool wasRunning = _syntheticTestRunning;
+        _syntheticTimer.Stop();
+        _syntheticTestRunning = false;
+        _syntheticButton.Text = "شروع آزمون ساختگی";
+        if (writeLog && wasRunning)
+            AppendLog("--- آزمون فریم ساختگی متوقف شد ---");
+    }
+
+    private void SendSyntheticTestFrame()
+    {
+        SerialPort? serial = _serial;
+        if (serial is null || !serial.IsOpen)
+        {
+            StopSyntheticTest(true);
+            return;
+        }
+
+        try
+        {
+            _syntheticSequence++;
+            uint timestampUs = unchecked((uint)(Stopwatch.GetTimestamp() * 1_000_000L / Stopwatch.Frequency));
+            byte[] frame = BuildSyntheticTestFrame(_syntheticSequence, timestampUs);
+            serial.Write(frame, 0, frame.Length);
+        }
+        catch (Exception ex)
+        {
+            StopSyntheticTest(false);
+            AppendLog("ارسال فریم آزمایشی متوقف شد: " + ex.Message);
+        }
+    }
+
+    private static byte[] BuildSyntheticTestFrame(ushort sequence, uint timestampUs)
+    {
+        const int payloadLength = 8;
+        const int headerSize = 11;
+        byte[] frame = new byte[headerSize + payloadLength + 2];
+        frame[0] = 0xA5;
+        frame[1] = 0x5A;
+        frame[2] = 1;
+        frame[3] = 1;
+        frame[4] = (byte)sequence;
+        frame[5] = (byte)(sequence >> 8);
+        frame[6] = payloadLength;
+        frame[7] = (byte)timestampUs;
+        frame[8] = (byte)(timestampUs >> 8);
+        frame[9] = (byte)(timestampUs >> 16);
+        frame[10] = (byte)(timestampUs >> 24);
+        frame[11] = 0x7E;
+        frame[12] = (byte)sequence;
+        frame[13] = (byte)(sequence >> 8);
+        frame[14] = 0;
+        frame[15] = 0;
+        frame[16] = 0xA5;
+        frame[17] = 0x5A;
+        frame[18] = 0xC3;
+        ushort crc = ComputeCrc16(frame, 2, 9 + payloadLength);
+        frame[19] = (byte)crc;
+        frame[20] = (byte)(crc >> 8);
+        return frame;
+    }
+
+    private static ushort ComputeCrc16(byte[] data, int offset, int length)
+    {
+        ushort crc = 0xFFFF;
+        for (int i = offset; i < offset + length; i++)
+        {
+            crc ^= (ushort)(data[i] << 8);
+            for (int bit = 0; bit < 8; bit++)
+                crc = (crc & 0x8000) != 0 ? (ushort)((crc << 1) ^ 0x1021) : (ushort)(crc << 1);
+        }
+        return crc;
     }
 
     private void PortDataReceived(object sender, SerialDataReceivedEventArgs e)
@@ -342,6 +450,8 @@ internal sealed class MonitorForm : Form
 
     private void Disconnect()
     {
+        StopSyntheticTest(false);
+        _syntheticButton.Enabled = false;
         var serial = _serial;
         _serial = null;
         if (serial is not null)
