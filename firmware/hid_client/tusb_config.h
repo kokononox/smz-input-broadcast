@@ -1,6 +1,10 @@
 #ifndef SMZ_TUSB_CONFIG_H_
 #define SMZ_TUSB_CONFIG_H_
 
+#ifndef BOARD_TUD_RHPORT
+#define BOARD_TUD_RHPORT 0
+#endif
+
 #define CFG_TUSB_MCU OPT_MCU_RP2040
 #define CFG_TUSB_OS OPT_OS_PICO
 #define CFG_TUD_ENABLED 1
