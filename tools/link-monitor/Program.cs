@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO.Ports;
 using System.Runtime.InteropServices;
@@ -21,7 +22,13 @@ internal sealed class MonitorForm : Form
     private readonly Button _refreshButton = new();
     private readonly Button _connectButton = new();
     private readonly Button _syntheticButton = new();
+    private readonly Button _captureOnlyButton = new();
     private readonly System.Threading.Timer _syntheticTimer;
+    private readonly System.Threading.Timer _captureTimer;
+    private readonly InputCaptureHooks _captureHooks = new();
+    private readonly LinkedList<byte[]> _captureQueue = new();
+    private readonly object _captureQueueLock = new();
+    private readonly object _serialWriteLock = new();
     private readonly Label _usbStatus = new();
     private readonly Label _linkStatus = new();
     private readonly Label _counts = new();
@@ -36,8 +43,12 @@ internal sealed class MonitorForm : Form
     private bool _sawMasterReport;
     private volatile bool _syntheticTestRunning;
     private bool _syntheticTimerResolutionActive;
-    private int _syntheticSequence;
+    private bool _captureTimerResolutionActive;
+    private int _eventSequence;
     private int _syntheticSendInProgress;
+    private volatile bool _captureOnlyRunning;
+    private int _captureDropped;
+    private int _captureSent;
     private string _latestLinkStatus = "منتظر گزارش فریمور مادر";
 
     [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod", ExactSpelling = true)]
@@ -60,10 +71,14 @@ internal sealed class MonitorForm : Form
         _timer.Tick += (_, _) => CheckConnectionState();
         _timer.Start();
         _syntheticTimer = new System.Threading.Timer(SendSyntheticTestFrame, null, Timeout.Infinite, Timeout.Infinite);
+        _captureTimer = new System.Threading.Timer(SendCaptureFrame, null, Timeout.Infinite, Timeout.Infinite);
+        _captureHooks.EventCaptured += EnqueueCaptureEvent;
         FormClosing += (_, _) =>
         {
             Disconnect();
             _syntheticTimer.Dispose();
+            _captureTimer.Dispose();
+            _captureHooks.Dispose();
         };
     }
 
@@ -106,6 +121,11 @@ internal sealed class MonitorForm : Form
         _syntheticButton.Enabled = false;
         _syntheticButton.Click += (_, _) => ToggleSyntheticTest();
         toolbar.Controls.Add(_syntheticButton);
+        _captureOnlyButton.Text = "شروع capture-only";
+        _captureOnlyButton.AutoSize = true;
+        _captureOnlyButton.Enabled = false;
+        _captureOnlyButton.Click += (_, _) => ToggleCaptureOnly();
+        toolbar.Controls.Add(_captureOnlyButton);
         root.Controls.Add(toolbar, 0, 0);
 
         var statusPanel = new TableLayoutPanel
@@ -137,7 +157,7 @@ internal sealed class MonitorForm : Form
         statusPanel.Controls.Add(_rtt, 0, 3);
         statusPanel.Controls.Add(new Label
         {
-            Text = "دکمهٔ آزمون فقط فریم ساختگی می‌فرستد؛ ورودی واقعی موس/صفحه‌کلید ضبط یا ارسال نمی‌شود.",
+            Text = "capture-only فقط با شروع دستی فعال می‌شود؛ ورودی ذخیره یا نمایش داده نمی‌شود و کلاینت HID اجرا نمی‌کند.",
             AutoSize = true,
             ForeColor = System.Drawing.Color.DimGray,
             Margin = new Padding(0, 5, 0, 0)
@@ -219,6 +239,7 @@ internal sealed class MonitorForm : Form
             _ports.Enabled = false;
             _refreshButton.Enabled = false;
             _syntheticButton.Enabled = true;
+            _captureOnlyButton.Enabled = true;
             SetUsbStatus($"USB: به {portName} وصل است", System.Drawing.Color.DarkGreen);
             SetLinkStatus(_latestLinkStatus, System.Drawing.Color.DimGray);
             AppendLog($"--- اتصال به {portName} با 115200 baud ---");
@@ -245,9 +266,9 @@ internal sealed class MonitorForm : Form
             return;
         }
 
-        _syntheticSequence = 0;
         _syntheticTestRunning = true;
         _syntheticButton.Text = "توقف آزمون";
+        _captureOnlyButton.Enabled = false;
         AppendLog("--- آزمون دستی فریم ساختگی آغاز شد؛ ورودی واقعی خوانده نمی‌شود ---");
         // WinForms timers can be coalesced to ~32 Hz by the default Windows timer resolution.
         // Request 1 ms precision only while this explicit synthetic test is active.
@@ -270,6 +291,7 @@ internal sealed class MonitorForm : Form
             _syntheticTimerResolutionActive = false;
         }
         _syntheticButton.Text = "شروع آزمون ساختگی";
+        _captureOnlyButton.Enabled = _serial is not null && _serial.IsOpen;
         if (writeLog && wasRunning)
             AppendLog("--- آزمون فریم ساختگی متوقف شد ---");
     }
@@ -288,10 +310,11 @@ internal sealed class MonitorForm : Form
                 return;
             }
 
-            ushort sequence = unchecked((ushort)Interlocked.Increment(ref _syntheticSequence));
+            ushort sequence = unchecked((ushort)Interlocked.Increment(ref _eventSequence));
             uint timestampUs = unchecked((uint)(Stopwatch.GetTimestamp() * 1_000_000L / Stopwatch.Frequency));
             byte[] frame = BuildSyntheticTestFrame(sequence, timestampUs);
-            serial.Write(frame, 0, frame.Length);
+            lock (_serialWriteLock)
+                serial.Write(frame, 0, frame.Length);
         }
         catch (Exception ex)
         {
@@ -324,32 +347,200 @@ internal sealed class MonitorForm : Form
 
     private static byte[] BuildSyntheticTestFrame(ushort sequence, uint timestampUs)
     {
-        const int payloadLength = 8;
+        byte[] payload =
+        {
+            0x7E, (byte)sequence, (byte)(sequence >> 8), 0, 0, 0xA5, 0x5A, 0xC3
+        };
+        return BuildEventFrame(sequence, timestampUs, payload);
+    }
+
+    private static byte[] BuildEventFrame(ushort sequence, uint timestampUs, byte[] payload)
+    {
         const int headerSize = 11;
-        byte[] frame = new byte[headerSize + payloadLength + 2];
+        if (payload.Length > 16)
+            throw new ArgumentOutOfRangeException(nameof(payload));
+
+        byte[] frame = new byte[headerSize + payload.Length + 2];
         frame[0] = 0xA5;
         frame[1] = 0x5A;
         frame[2] = 1;
         frame[3] = 1;
         frame[4] = (byte)sequence;
         frame[5] = (byte)(sequence >> 8);
-        frame[6] = payloadLength;
+        frame[6] = (byte)payload.Length;
         frame[7] = (byte)timestampUs;
         frame[8] = (byte)(timestampUs >> 8);
         frame[9] = (byte)(timestampUs >> 16);
         frame[10] = (byte)(timestampUs >> 24);
-        frame[11] = 0x7E;
-        frame[12] = (byte)sequence;
-        frame[13] = (byte)(sequence >> 8);
-        frame[14] = 0;
-        frame[15] = 0;
-        frame[16] = 0xA5;
-        frame[17] = 0x5A;
-        frame[18] = 0xC3;
-        ushort crc = ComputeCrc16(frame, 2, 9 + payloadLength);
-        frame[19] = (byte)crc;
-        frame[20] = (byte)(crc >> 8);
+        Array.Copy(payload, 0, frame, headerSize, payload.Length);
+        ushort crc = ComputeCrc16(frame, 2, 9 + payload.Length);
+        frame[headerSize + payload.Length] = (byte)crc;
+        frame[headerSize + payload.Length + 1] = (byte)(crc >> 8);
         return frame;
+    }
+
+    private void ToggleCaptureOnly()
+    {
+        if (_captureOnlyRunning)
+        {
+            StopCaptureOnly(true);
+            return;
+        }
+        if (_serial is null || !_serial.IsOpen)
+        {
+            MessageBox.Show(this, "ابتدا به پورت COM پیکوی مادر وصل شوید.", "اتصال لازم است", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (_syntheticTestRunning)
+        {
+            MessageBox.Show(this, "ابتدا آزمون ساختگی را متوقف کنید.", "آزمون در حال اجراست", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        string consent = "تا وقتی capture-only روشن است، برنامه رویدادهای کلید و ماوس این ویندوز را می‌خواند و از USB به Pico کلاینت می‌فرستد. محتوا در فایل یا گزارش ذخیره/نمایش داده نمی‌شود؛ کلاینت فقط فریم را اعتبارسنجی و ACK می‌کند و HID اجرا نمی‌شود. فقط روی دستگاه‌هایی ادامه بده که مجاز به آزمودنشان هستی. شروع کنیم؟";
+        if (MessageBox.Show(this, consent, "تأیید دریافت ورودی", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+            return;
+
+        lock (_captureQueueLock)
+            _captureQueue.Clear();
+        _captureDropped = 0;
+        _captureSent = 0;
+        _captureOnlyRunning = true;
+        try
+        {
+            _captureHooks.Start();
+            uint timerResult = TimeBeginPeriod(1);
+            _captureTimerResolutionActive = timerResult == 0;
+            _captureOnlyButton.Text = "توقف capture-only";
+            _syntheticButton.Enabled = false;
+            AppendLog("--- capture-only روشن شد؛ رویدادها فقط شمارش/ACK می‌شوند؛ HID خاموش است ---");
+            _captureTimer.Change(0, 20);
+        }
+        catch (Exception ex)
+        {
+            _captureOnlyRunning = false;
+            _captureHooks.Stop();
+            if (_captureTimerResolutionActive)
+            {
+                TimeEndPeriod(1);
+                _captureTimerResolutionActive = false;
+            }
+            _captureOnlyButton.Text = "شروع capture-only";
+            _syntheticButton.Enabled = true;
+            MessageBox.Show(this, "فعال‌سازی دریافت ورودی ناموفق بود: " + ex.Message, "خطای capture-only", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void EnqueueCaptureEvent(byte[] payload)
+    {
+        if (!_captureOnlyRunning)
+            return;
+        lock (_captureQueueLock)
+        {
+            if (!_captureOnlyRunning)
+                return;
+            if (payload.Length == 5 && payload[0] == 0x02 && _captureQueue.Count > 0 && _captureQueue.Last!.Value[0] == 0x02)
+            {
+                byte[] last = _captureQueue.Last.Value;
+                short oldDx = unchecked((short)(last[1] | (last[2] << 8)));
+                short oldDy = unchecked((short)(last[3] | (last[4] << 8)));
+                short newDx = unchecked((short)(payload[1] | (payload[2] << 8)));
+                short newDy = unchecked((short)(payload[3] | (payload[4] << 8)));
+                int dx = Math.Clamp((int)oldDx + newDx, short.MinValue, short.MaxValue);
+                int dy = Math.Clamp((int)oldDy + newDy, short.MinValue, short.MaxValue);
+                last[1] = (byte)dx;
+                last[2] = (byte)(dx >> 8);
+                last[3] = (byte)dy;
+                last[4] = (byte)(dy >> 8);
+                return;
+            }
+            if (_captureQueue.Count >= 256)
+            {
+                Interlocked.Increment(ref _captureDropped);
+                return;
+            }
+            _captureQueue.AddLast(payload);
+        }
+    }
+
+    private void SendCaptureFrame(object? state)
+    {
+        lock (_serialWriteLock)
+        {
+            if (!_captureOnlyRunning)
+                return;
+
+            byte[]? payload = null;
+            lock (_captureQueueLock)
+            {
+                if (_captureQueue.Count > 0)
+                {
+                    payload = _captureQueue.First!.Value;
+                    _captureQueue.RemoveFirst();
+                }
+            }
+            if (payload is null)
+                return;
+
+            SerialPort? serial = _serial;
+            if (serial is null || !serial.IsOpen)
+            {
+                QueueCaptureOnlyStop("پورت سریال بسته شد؛ capture-only متوقف شد.");
+                return;
+            }
+
+            try
+            {
+                ushort sequence = unchecked((ushort)Interlocked.Increment(ref _eventSequence));
+                uint timestampUs = unchecked((uint)(Stopwatch.GetTimestamp() * 1_000_000L / Stopwatch.Frequency));
+                byte[] frame = BuildEventFrame(sequence, timestampUs, payload);
+                serial.Write(frame, 0, frame.Length);
+                Interlocked.Increment(ref _captureSent);
+            }
+            catch (Exception ex)
+            {
+                QueueCaptureOnlyStop("ارسال capture-only متوقف شد: " + ex.Message);
+            }
+        }
+    }
+
+    private void QueueCaptureOnlyStop(string message)
+    {
+        _captureOnlyRunning = false;
+        try { _captureTimer.Change(Timeout.Infinite, Timeout.Infinite); }
+        catch (ObjectDisposedException) { }
+        if (IsDisposed || !IsHandleCreated)
+            return;
+        try
+        {
+            BeginInvoke(new Action(() =>
+            {
+                StopCaptureOnly(false);
+                AppendLog(message);
+            }));
+        }
+        catch (InvalidOperationException) { }
+    }
+
+    private void StopCaptureOnly(bool writeLog)
+    {
+        bool wasRunning = _captureOnlyRunning;
+        _captureOnlyRunning = false;
+        try { _captureTimer.Change(Timeout.Infinite, Timeout.Infinite); }
+        catch (ObjectDisposedException) { }
+        _captureHooks.Stop();
+        lock (_serialWriteLock) { }
+        lock (_captureQueueLock)
+            _captureQueue.Clear();
+        if (_captureTimerResolutionActive)
+        {
+            TimeEndPeriod(1);
+            _captureTimerResolutionActive = false;
+        }
+        _captureOnlyButton.Text = "شروع capture-only";
+        _syntheticButton.Enabled = _serial is not null && _serial.IsOpen;
+        if (writeLog && wasRunning)
+            AppendLog($"--- capture-only خاموش شد: {_captureSent} فریم؛ {_captureDropped} مورد از صف کنار گذاشته شد؛ هیچ HID اجرا نشد ---");
     }
 
     private static ushort ComputeCrc16(byte[] data, int offset, int length)
@@ -499,8 +690,10 @@ internal sealed class MonitorForm : Form
 
     private void Disconnect()
     {
+        StopCaptureOnly(false);
         StopSyntheticTest(false);
         _syntheticButton.Enabled = false;
+        _captureOnlyButton.Enabled = false;
         var serial = _serial;
         _serial = null;
         if (serial is not null)
