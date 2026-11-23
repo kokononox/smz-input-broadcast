@@ -10,6 +10,17 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 pico_sdk_init()
 
+# This test firmware is C-only and does not use dynamic allocation. Avoid
+# pulling the SDK's C++ new/delete shim into every image, which requires the
+# large ARM libstdc++ runtime package just for this C test.
+if(TARGET pico_cxx_options)
+    get_target_property(PICO_CXX_OPTION_SOURCES pico_cxx_options INTERFACE_SOURCES)
+    if(PICO_CXX_OPTION_SOURCES)
+        list(FILTER PICO_CXX_OPTION_SOURCES EXCLUDE REGEX "/new_delete\\.cpp$")
+        set_property(TARGET pico_cxx_options PROPERTY INTERFACE_SOURCES "${PICO_CXX_OPTION_SOURCES}")
+    endif()
+endif()
+
 set(EVENT_TEST_ROLE "" CACHE STRING "Firmware role: MASTER, CLIENT, or HOST_MASTER")
 set_property(CACHE EVENT_TEST_ROLE PROPERTY STRINGS MASTER CLIENT HOST_MASTER)
 if(NOT EVENT_TEST_ROLE STREQUAL "MASTER" AND NOT EVENT_TEST_ROLE STREQUAL "CLIENT" AND NOT EVENT_TEST_ROLE STREQUAL "HOST_MASTER")
@@ -17,6 +28,7 @@ if(NOT EVENT_TEST_ROLE STREQUAL "MASTER" AND NOT EVENT_TEST_ROLE STREQUAL "CLIEN
 endif()
 
 add_executable(smz_event_transport_test event_transport_test.c)
+set_property(TARGET smz_event_transport_test PROPERTY LINKER_LANGUAGE C)
 if(EVENT_TEST_ROLE STREQUAL "MASTER")
     target_compile_definitions(smz_event_transport_test PRIVATE EVENT_TEST_MASTER=1)
 elseif(EVENT_TEST_ROLE STREQUAL "CLIENT")
