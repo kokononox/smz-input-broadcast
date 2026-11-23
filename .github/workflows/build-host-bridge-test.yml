@@ -27,7 +27,7 @@ jobs:
       - name: Install ARM toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y gcc-arm-none-eabi libnewlib-arm-none-eabi cmake ninja-build
+          sudo apt-get install --no-install-recommends -y gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-dev cmake ninja-build
       - name: Configure Pico SDK path
         run: echo "PICO_SDK_PATH=$GITHUB_WORKSPACE/pico-sdk" >> "$GITHUB_ENV"
       - name: Build HOST_MASTER firmware
