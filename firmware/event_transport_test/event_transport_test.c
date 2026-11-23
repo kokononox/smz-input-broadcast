@@ -38,11 +38,12 @@
 #define TEST_PATTERN1 0x5Au
 #define TEST_PATTERN2 0xC3u
 
-/* Capture-only event kinds. The client validates and ACKs these; it never emits HID. */
+/* Input event kinds shared by the host bridge and the HID-capable client. */
 #define INPUT_EVENT_KIND_KEY 0x01u
 #define INPUT_EVENT_KIND_MOUSE_MOVE 0x02u
 #define INPUT_EVENT_KIND_MOUSE_BUTTON 0x03u
 #define INPUT_EVENT_KIND_MOUSE_WHEEL 0x04u
+#define INPUT_EVENT_KIND_HEARTBEAT 0x05u
 
 #define EVENT_INTERVAL_US 20000u
 #define ACK_TIMEOUT_US 100000u
@@ -215,7 +216,7 @@ static bool is_valid_event(const Frame *frame) {
                frame->payload[7] == TEST_PATTERN2;
     }
 
-    /* Capture-only wire schema. Payloads are validated, never displayed or executed. */
+    /* Input-event wire schema. The test client validates only; the HID client may execute when physically armed. */
     switch (frame->payload[0]) {
         case INPUT_EVENT_KIND_KEY:
             /* kind, scan-code LE16, down(1)/up(0), extended(0/1) */
@@ -232,6 +233,9 @@ static bool is_valid_event(const Frame *frame) {
         case INPUT_EVENT_KIND_MOUSE_WHEEL:
             /* kind, delta LE16, axis(0 vertical / 1 horizontal) */
             return frame->payload_length == 4u && frame->payload[3] <= 1u;
+        case INPUT_EVENT_KIND_HEARTBEAT:
+            /* kind only; keeps the armed HID client's link watchdog alive */
+            return frame->payload_length == 1u;
         default:
             return false;
     }

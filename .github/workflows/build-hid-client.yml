@@ -1,0 +1,43 @@
+name: Build HID client firmware
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "firmware/hid_client/**"
+      - ".github/workflows/build-hid-client.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-hid-client:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+      - name: Check out Pico SDK
+        uses: actions/checkout@v4
+        with:
+          repository: raspberrypi/pico-sdk
+          ref: 2.3.1
+          path: pico-sdk
+          submodules: recursive
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y gcc-arm-none-eabi libnewlib-arm-none-eabi cmake ninja-build
+      - name: Configure Pico SDK path
+        run: echo "PICO_SDK_PATH=$GITHUB_WORKSPACE/pico-sdk" >> "$GITHUB_ENV"
+      - name: Build HID client UF2
+        run: |
+          cmake -S firmware/hid_client -B build/hid-client -G Ninja -DPICO_BOARD=pico
+          cmake --build build/hid-client --parallel 2
+      - name: Upload HID client UF2
+        uses: actions/upload-artifact@v4
+        with:
+          name: SMZ-HID-Client-UF2
+          path: build/hid-client/smz_hid_client.uf2
+          if-no-files-found: error
+          retention-days: 14

@@ -49,6 +49,7 @@ internal sealed class MonitorForm : Form
     private volatile bool _captureOnlyRunning;
     private int _captureDropped;
     private int _captureSent;
+    private long _lastCaptureHeartbeatTicks;
     private string _latestLinkStatus = "منتظر گزارش فریمور مادر";
 
     [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod", ExactSpelling = true)]
@@ -121,7 +122,7 @@ internal sealed class MonitorForm : Form
         _syntheticButton.Enabled = false;
         _syntheticButton.Click += (_, _) => ToggleSyntheticTest();
         toolbar.Controls.Add(_syntheticButton);
-        _captureOnlyButton.Text = "شروع capture-only";
+        _captureOnlyButton.Text = "شروع ارسال HID";
         _captureOnlyButton.AutoSize = true;
         _captureOnlyButton.Enabled = false;
         _captureOnlyButton.Click += (_, _) => ToggleCaptureOnly();
@@ -157,7 +158,7 @@ internal sealed class MonitorForm : Form
         statusPanel.Controls.Add(_rtt, 0, 3);
         statusPanel.Controls.Add(new Label
         {
-            Text = "capture-only فقط با شروع دستی فعال می‌شود؛ ورودی ذخیره یا نمایش داده نمی‌شود و کلاینت HID اجرا نمی‌کند.",
+            Text = "ارسال فقط با شروع دستی و جامپر GP14↔GND روی پیکوی کلاینت فعال می‌شود؛ با توقف یا قطع لینک، کلیدها آزاد می‌شوند.",
             AutoSize = true,
             ForeColor = System.Drawing.Color.DimGray,
             Margin = new Padding(0, 5, 0, 0)
@@ -397,7 +398,7 @@ internal sealed class MonitorForm : Form
             return;
         }
 
-        string consent = "تا وقتی capture-only روشن است، برنامه رویدادهای کلید و ماوس این ویندوز را می‌خواند و از USB به Pico کلاینت می‌فرستد. محتوا در فایل یا گزارش ذخیره/نمایش داده نمی‌شود؛ کلاینت فقط فریم را اعتبارسنجی و ACK می‌کند و HID اجرا نمی‌شود. فقط روی دستگاه‌هایی ادامه بده که مجاز به آزمودنشان هستی. شروع کنیم؟";
+        string consent = "تا وقتی ارسال HID روشن است، برنامه ورودی کلید و ماوس این ویندوز را می‌خواند و به پیکوی کلاینت می‌فرستد. اگر جامپر فیزیکی GP14 به GND وصل باشد، پیکوی کلاینت آن ورودی را مثل صفحه‌کلید و ماوس USB به رایانهٔ مقصد می‌فرستد. محتوا ذخیره یا در گزارش نمایش داده نمی‌شود. فقط روی دستگاه‌هایی ادامه بده که مجاز به کنترلشان هستی و قبل از شروع مطمئن شو رایانهٔ مقصد آماده است. ادامه می‌دهی؟";
         if (MessageBox.Show(this, consent, "تأیید دریافت ورودی", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
             return;
 
@@ -405,15 +406,16 @@ internal sealed class MonitorForm : Form
             _captureQueue.Clear();
         _captureDropped = 0;
         _captureSent = 0;
+        Interlocked.Exchange(ref _lastCaptureHeartbeatTicks, Stopwatch.GetTimestamp());
         _captureOnlyRunning = true;
         try
         {
             _captureHooks.Start();
             uint timerResult = TimeBeginPeriod(1);
             _captureTimerResolutionActive = timerResult == 0;
-            _captureOnlyButton.Text = "توقف capture-only";
+            _captureOnlyButton.Text = "توقف ارسال HID";
             _syntheticButton.Enabled = false;
-            AppendLog("--- capture-only روشن شد؛ رویدادها فقط شمارش/ACK می‌شوند؛ HID خاموش است ---");
+            AppendLog("--- ارسال HID روشن شد؛ اجرای ورودی فقط با جامپر فیزیکی کلاینت فعال است ---");
             _captureTimer.Change(0, 20);
         }
         catch (Exception ex)
@@ -425,9 +427,9 @@ internal sealed class MonitorForm : Form
                 TimeEndPeriod(1);
                 _captureTimerResolutionActive = false;
             }
-            _captureOnlyButton.Text = "شروع capture-only";
+            _captureOnlyButton.Text = "شروع ارسال HID";
             _syntheticButton.Enabled = true;
-            MessageBox.Show(this, "فعال‌سازی دریافت ورودی ناموفق بود: " + ex.Message, "خطای capture-only", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, "فعال‌سازی ارسال ورودی ناموفق بود: " + ex.Message, "خطای ارسال HID", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -480,12 +482,18 @@ internal sealed class MonitorForm : Form
                 }
             }
             if (payload is null)
-                return;
+            {
+                long nowTicks = Stopwatch.GetTimestamp();
+                long lastTicks = Interlocked.Read(ref _lastCaptureHeartbeatTicks);
+                if ((nowTicks - lastTicks) * 1000L / Stopwatch.Frequency < 100L)
+                    return;
+                payload = new byte[] { 0x05 }; // heartbeat keeps client watchdog alive
+            }
 
             SerialPort? serial = _serial;
             if (serial is null || !serial.IsOpen)
             {
-                QueueCaptureOnlyStop("پورت سریال بسته شد؛ capture-only متوقف شد.");
+                QueueCaptureOnlyStop("پورت سریال بسته شد؛ ارسال HID متوقف شد.");
                 return;
             }
 
@@ -495,11 +503,12 @@ internal sealed class MonitorForm : Form
                 uint timestampUs = unchecked((uint)(Stopwatch.GetTimestamp() * 1_000_000L / Stopwatch.Frequency));
                 byte[] frame = BuildEventFrame(sequence, timestampUs, payload);
                 serial.Write(frame, 0, frame.Length);
+                Interlocked.Exchange(ref _lastCaptureHeartbeatTicks, Stopwatch.GetTimestamp());
                 Interlocked.Increment(ref _captureSent);
             }
             catch (Exception ex)
             {
-                QueueCaptureOnlyStop("ارسال capture-only متوقف شد: " + ex.Message);
+                QueueCaptureOnlyStop("ارسال HID متوقف شد: " + ex.Message);
             }
         }
     }
@@ -537,10 +546,10 @@ internal sealed class MonitorForm : Form
             TimeEndPeriod(1);
             _captureTimerResolutionActive = false;
         }
-        _captureOnlyButton.Text = "شروع capture-only";
+        _captureOnlyButton.Text = "شروع ارسال HID";
         _syntheticButton.Enabled = _serial is not null && _serial.IsOpen;
         if (writeLog && wasRunning)
-            AppendLog($"--- capture-only خاموش شد: {_captureSent} فریم؛ {_captureDropped} مورد از صف کنار گذاشته شد؛ هیچ HID اجرا نشد ---");
+            AppendLog($"--- ارسال HID متوقف شد: {_captureSent} فریم؛ {_captureDropped} مورد از صف کنار گذاشته شد؛ کلاینت با timeout کلیدها را آزاد می‌کند ---");
     }
 
     private static ushort ComputeCrc16(byte[] data, int offset, int length)
