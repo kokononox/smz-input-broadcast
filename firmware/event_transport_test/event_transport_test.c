@@ -7,13 +7,14 @@
 #include "hardware/gpio.h"
 #include "hardware/uart.h"
 #include "pico/stdlib.h"
+#include "pico/stdio.h"
 
-#if defined(EVENT_TEST_MASTER)
+#if defined(EVENT_TEST_MASTER) || defined(EVENT_TEST_HOST_MASTER)
 #define ROLE_NAME "MASTER"
 #elif defined(EVENT_TEST_CLIENT)
 #define ROLE_NAME "CLIENT"
 #else
-#error "Build with EVENT_TEST_ROLE=MASTER or EVENT_TEST_ROLE=CLIENT"
+#error "Build with EVENT_TEST_ROLE=MASTER, CLIENT, or HOST_MASTER"
 #endif
 
 #define LINK_UART uart1
@@ -193,7 +194,7 @@ static void init_link_uart(void) {
     uart_set_fifo_enabled(LINK_UART, true);
 }
 
-#ifdef EVENT_TEST_CLIENT
+#if defined(EVENT_TEST_CLIENT) || defined(EVENT_TEST_HOST_MASTER)
 static bool is_valid_test_event(const Frame *frame) {
     if (frame->type != FRAME_TYPE_EVENT || frame->payload_length != TEST_PAYLOAD_SIZE) {
         return false;
@@ -203,6 +204,20 @@ static bool is_valid_test_event(const Frame *frame) {
            frame->payload[5] == TEST_PATTERN0 &&
            frame->payload[6] == TEST_PATTERN1 &&
            frame->payload[7] == TEST_PATTERN2;
+}
+#endif
+
+#ifdef EVENT_TEST_HOST_MASTER
+static bool read_host_frame(FrameParser *parser, Frame *frame) {
+    while (true) {
+        const int value = getchar_timeout_us(0);
+        if (value < 0) {
+            return false;
+        }
+        if (parser_feed(parser, (uint8_t)value, frame)) {
+            return true;
+        }
+    }
 }
 #endif
 
@@ -286,6 +301,97 @@ static void run_master(void) {
         tight_loop_contents();
     }
 }
+#elif defined(EVENT_TEST_HOST_MASTER)
+static void run_host_master(void) {
+    FrameParser uart_parser = {0};
+    FrameParser host_parser = {0};
+    bool pending = false;
+    uint16_t pending_sequence = 0u;
+    uint32_t pending_timestamp = 0u;
+    uint32_t pending_started_us = 0u;
+    uint32_t last_report_us = time_us_32();
+
+    uint32_t host_frames = 0u;
+    uint32_t events_sent = 0u;
+    uint32_t acks_received = 0u;
+    uint32_t timeouts = 0u;
+    uint32_t invalid_events = 0u;
+    uint32_t busy_drops = 0u;
+    uint32_t rtt_samples = 0u;
+    uint32_t rtt_min_us = UINT32_MAX;
+    uint32_t rtt_max_us = 0u;
+    uint64_t rtt_sum_us = 0u;
+
+    printf("SMZ host event bridge test: %s, USB CDC -> UART1 %lu baud, no input capture or HID\n",
+           ROLE_NAME, (unsigned long)LINK_BAUD);
+
+    while (true) {
+        Frame frame;
+        while (read_frame(&uart_parser, &frame)) {
+            if (frame.type == FRAME_TYPE_ACK && frame.payload_length == 0u && pending &&
+                frame.sequence == pending_sequence &&
+                frame.timestamp_us == pending_timestamp) {
+                const uint32_t rtt_us = time_us_32() - pending_started_us;
+                pending = false;
+                acks_received++;
+                rtt_samples++;
+                rtt_sum_us += rtt_us;
+                if (rtt_us < rtt_min_us) rtt_min_us = rtt_us;
+                if (rtt_us > rtt_max_us) rtt_max_us = rtt_us;
+            }
+        }
+
+        while (read_host_frame(&host_parser, &frame)) {
+            if (!is_valid_test_event(&frame)) {
+                invalid_events++;
+                continue;
+            }
+            host_frames++;
+            if (pending) {
+                busy_drops++;
+                continue;
+            }
+            pending = true;
+            pending_sequence = frame.sequence;
+            pending_timestamp = frame.timestamp_us;
+            pending_started_us = time_us_32();
+            events_sent++;
+            send_frame(FRAME_TYPE_EVENT, frame.sequence, frame.timestamp_us,
+                       frame.payload, frame.payload_length);
+        }
+
+        const uint32_t now_us = time_us_32();
+        if (pending && (uint32_t)(now_us - pending_started_us) >= ACK_TIMEOUT_US) {
+            pending = false;
+            timeouts++;
+        }
+
+        if ((uint32_t)(now_us - last_report_us) >= REPORT_INTERVAL_US) {
+            const uint32_t average = rtt_samples == 0u
+                ? 0u : (uint32_t)(rtt_sum_us / rtt_samples);
+            const uint32_t min_value = rtt_samples == 0u ? 0u : rtt_min_us;
+            printf("MASTER,mode=host-test,host_rx=%lu,tx=%lu,ack=%lu,timeout=%lu,busy=%lu,invalid=%lu,rtt_us_min=%lu,rtt_us_avg=%lu,rtt_us_max=%lu,crc=%lu,host_crc=%lu\n",
+                   (unsigned long)host_frames, (unsigned long)events_sent,
+                   (unsigned long)acks_received, (unsigned long)timeouts,
+                   (unsigned long)busy_drops, (unsigned long)invalid_events,
+                   (unsigned long)min_value, (unsigned long)average,
+                   (unsigned long)rtt_max_us, (unsigned long)uart_parser.crc_errors,
+                   (unsigned long)host_parser.crc_errors);
+            host_frames = 0u;
+            events_sent = 0u;
+            acks_received = 0u;
+            timeouts = 0u;
+            invalid_events = 0u;
+            busy_drops = 0u;
+            rtt_samples = 0u;
+            rtt_min_us = UINT32_MAX;
+            rtt_max_us = 0u;
+            rtt_sum_us = 0u;
+            last_report_us = now_us;
+        }
+        tight_loop_contents();
+    }
+}
 #else
 static void run_client(void) {
     FrameParser parser = {0};
@@ -340,6 +446,8 @@ int main(void) {
     sleep_ms(1500u);
 #ifdef EVENT_TEST_MASTER
     run_master();
+#elif defined(EVENT_TEST_HOST_MASTER)
+    run_host_master();
 #else
     run_client();
 #endif
