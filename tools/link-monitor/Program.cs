@@ -21,7 +21,7 @@ internal sealed class MonitorForm : Form
     private readonly Button _refreshButton = new();
     private readonly Button _connectButton = new();
     private readonly Button _syntheticButton = new();
-    private readonly System.Windows.Forms.Timer _syntheticTimer = new();
+    private readonly System.Threading.Timer _syntheticTimer;
     private readonly Label _usbStatus = new();
     private readonly Label _linkStatus = new();
     private readonly Label _counts = new();
@@ -34,9 +34,10 @@ internal sealed class MonitorForm : Form
     private DateTime _lastReportUtc = DateTime.MinValue;
     private DateTime _connectedUtc = DateTime.MinValue;
     private bool _sawMasterReport;
-    private bool _syntheticTestRunning;
+    private volatile bool _syntheticTestRunning;
     private bool _syntheticTimerResolutionActive;
-    private ushort _syntheticSequence;
+    private int _syntheticSequence;
+    private int _syntheticSendInProgress;
     private string _latestLinkStatus = "منتظر گزارش فریمور مادر";
 
     [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod", ExactSpelling = true)]
@@ -58,9 +59,12 @@ internal sealed class MonitorForm : Form
         _timer.Interval = 500;
         _timer.Tick += (_, _) => CheckConnectionState();
         _timer.Start();
-        _syntheticTimer.Interval = 20;
-        _syntheticTimer.Tick += (_, _) => SendSyntheticTestFrame();
-        FormClosing += (_, _) => Disconnect();
+        _syntheticTimer = new System.Threading.Timer(SendSyntheticTestFrame, null, Timeout.Infinite, Timeout.Infinite);
+        FormClosing += (_, _) =>
+        {
+            Disconnect();
+            _syntheticTimer.Dispose();
+        };
     }
 
     private void BuildUi()
@@ -251,13 +255,14 @@ internal sealed class MonitorForm : Form
         _syntheticTimerResolutionActive = timerResult == 0;
         if (!_syntheticTimerResolutionActive)
             AppendLog($"زمان‌بندی دقیق ویندوز فعال نشد (کد {timerResult})؛ آزمون با دقت پیش‌فرض ادامه می‌یابد.");
-        _syntheticTimer.Start();
+        AppendLog("--- زمان‌بندی نسخهٔ جدید: Timer پس‌زمینه، هدف 50Hz ---");
+        _syntheticTimer.Change(0, 20);
     }
 
     private void StopSyntheticTest(bool writeLog)
     {
         bool wasRunning = _syntheticTestRunning;
-        _syntheticTimer.Stop();
+        _syntheticTimer.Change(Timeout.Infinite, Timeout.Infinite);
         _syntheticTestRunning = false;
         if (_syntheticTimerResolutionActive)
         {
@@ -269,27 +274,52 @@ internal sealed class MonitorForm : Form
             AppendLog("--- آزمون فریم ساختگی متوقف شد ---");
     }
 
-    private void SendSyntheticTestFrame()
+    private void SendSyntheticTestFrame(object? state)
     {
-        SerialPort? serial = _serial;
-        if (serial is null || !serial.IsOpen)
-        {
-            StopSyntheticTest(true);
+        if (!_syntheticTestRunning || Interlocked.Exchange(ref _syntheticSendInProgress, 1) != 0)
             return;
-        }
 
         try
         {
-            _syntheticSequence++;
+            SerialPort? serial = _serial;
+            if (serial is null || !serial.IsOpen)
+            {
+                QueueSyntheticTestStop("پورت سریال بسته شد؛ آزمون ساختگی متوقف شد.");
+                return;
+            }
+
+            ushort sequence = unchecked((ushort)Interlocked.Increment(ref _syntheticSequence));
             uint timestampUs = unchecked((uint)(Stopwatch.GetTimestamp() * 1_000_000L / Stopwatch.Frequency));
-            byte[] frame = BuildSyntheticTestFrame(_syntheticSequence, timestampUs);
+            byte[] frame = BuildSyntheticTestFrame(sequence, timestampUs);
             serial.Write(frame, 0, frame.Length);
         }
         catch (Exception ex)
         {
-            StopSyntheticTest(false);
-            AppendLog("ارسال فریم آزمایشی متوقف شد: " + ex.Message);
+            QueueSyntheticTestStop("ارسال فریم آزمایشی متوقف شد: " + ex.Message);
         }
+        finally
+        {
+            Interlocked.Exchange(ref _syntheticSendInProgress, 0);
+        }
+    }
+
+    private void QueueSyntheticTestStop(string message)
+    {
+        _syntheticTestRunning = false;
+        try { _syntheticTimer.Change(Timeout.Infinite, Timeout.Infinite); }
+        catch (ObjectDisposedException) { }
+        if (IsDisposed || !IsHandleCreated)
+            return;
+
+        try
+        {
+            BeginInvoke(new Action(() =>
+            {
+                StopSyntheticTest(false);
+                AppendLog(message);
+            }));
+        }
+        catch (InvalidOperationException) { }
     }
 
     private static byte[] BuildSyntheticTestFrame(ushort sequence, uint timestampUs)
