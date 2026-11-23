@@ -178,7 +178,7 @@ internal sealed class MonitorForm : Form
             var serial = new SerialPort(portName, 115200, Parity.None, 8, StopBits.One)
             {
                 Handshake = Handshake.None,
-                DtrEnable = false,
+                DtrEnable = true,
                 RtsEnable = false,
                 Encoding = Encoding.ASCII,
                 ReadTimeout = 500,
