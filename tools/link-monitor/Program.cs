@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.IO.Ports;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
 
@@ -34,8 +35,15 @@ internal sealed class MonitorForm : Form
     private DateTime _connectedUtc = DateTime.MinValue;
     private bool _sawMasterReport;
     private bool _syntheticTestRunning;
+    private bool _syntheticTimerResolutionActive;
     private ushort _syntheticSequence;
     private string _latestLinkStatus = "منتظر گزارش فریمور مادر";
+
+    [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod", ExactSpelling = true)]
+    private static extern uint TimeBeginPeriod(uint period);
+
+    [DllImport("winmm.dll", EntryPoint = "timeEndPeriod", ExactSpelling = true)]
+    private static extern uint TimeEndPeriod(uint period);
 
     public MonitorForm()
     {
@@ -237,6 +245,12 @@ internal sealed class MonitorForm : Form
         _syntheticTestRunning = true;
         _syntheticButton.Text = "توقف آزمون";
         AppendLog("--- آزمون دستی فریم ساختگی آغاز شد؛ ورودی واقعی خوانده نمی‌شود ---");
+        // WinForms timers can be coalesced to ~32 Hz by the default Windows timer resolution.
+        // Request 1 ms precision only while this explicit synthetic test is active.
+        uint timerResult = TimeBeginPeriod(1);
+        _syntheticTimerResolutionActive = timerResult == 0;
+        if (!_syntheticTimerResolutionActive)
+            AppendLog($"زمان‌بندی دقیق ویندوز فعال نشد (کد {timerResult})؛ آزمون با دقت پیش‌فرض ادامه می‌یابد.");
         _syntheticTimer.Start();
     }
 
@@ -245,6 +259,11 @@ internal sealed class MonitorForm : Form
         bool wasRunning = _syntheticTestRunning;
         _syntheticTimer.Stop();
         _syntheticTestRunning = false;
+        if (_syntheticTimerResolutionActive)
+        {
+            TimeEndPeriod(1);
+            _syntheticTimerResolutionActive = false;
+        }
         _syntheticButton.Text = "شروع آزمون ساختگی";
         if (writeLog && wasRunning)
             AppendLog("--- آزمون فریم ساختگی متوقف شد ---");
