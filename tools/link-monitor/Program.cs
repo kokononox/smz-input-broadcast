@@ -28,6 +28,7 @@ internal sealed class MonitorForm : Form
     private readonly object _bufferLock = new();
     private SerialPort? _serial;
     private DateTime _lastReportUtc = DateTime.MinValue;
+    private DateTime _connectedUtc = DateTime.MinValue;
     private bool _sawMasterReport;
     private string _latestLinkStatus = "منتظر گزارش فریمور مادر";
 
@@ -99,6 +100,13 @@ internal sealed class MonitorForm : Form
         _linkStatus.Text = "لینک بردبه‌برد: منتظر شروع";
         _counts.Text = "گزارش یک‌ثانیه‌ای: —";
         _rtt.Text = "RTT: —";
+        foreach (Label statusLabel in new[] { _usbStatus, _linkStatus, _counts, _rtt })
+        {
+            statusLabel.AutoSize = false;
+            statusLabel.Dock = DockStyle.Fill;
+            statusLabel.AutoEllipsis = true;
+            statusLabel.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
+        }
         statusPanel.Controls.Add(_usbStatus, 0, 0);
         statusPanel.Controls.Add(_linkStatus, 0, 1);
         statusPanel.Controls.Add(_counts, 0, 2);
@@ -181,6 +189,7 @@ internal sealed class MonitorForm : Form
             _serial = serial;
             _sawMasterReport = false;
             _lastReportUtc = DateTime.MinValue;
+            _connectedUtc = DateTime.UtcNow;
             _latestLinkStatus = "منتظر گزارش فریمور مادر";
             _connectButton.Text = "قطع اتصال";
             _ports.Enabled = false;
@@ -316,6 +325,12 @@ internal sealed class MonitorForm : Form
             }
         }
         catch { }
+
+        if (!_sawMasterReport && (DateTime.UtcNow - _connectedUtc).TotalSeconds > 3)
+        {
+            SetLinkStatus("COM باز است، اما هنوز گزارشی از فریمور مادر نرسیده", System.Drawing.Color.DarkOrange);
+            return;
+        }
 
         if (_sawMasterReport && (DateTime.UtcNow - _lastReportUtc).TotalSeconds > 3)
         {
