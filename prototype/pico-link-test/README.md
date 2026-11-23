@@ -2,9 +2,9 @@
 
 This prototype checks a one-client UART link and reports request/ACK round-trip time. It sends only `PING|sequence` and `ACK|sequence`; it does **not** capture or replay keyboard/mouse input and does not initialize HID.
 
-## Pin candidate
+## Confirmed pins
 
-The current firmware and user's clarification establish GP3/GP4 as physical-button pins; GP16/GP17 are already used by the Pico-to-Pro-Micro UART. GP8/GP9 appear unused in the reviewed Pico template and are the proposed UART1 pair, pending confirmation on both physical boards.
+The user confirmed GP3/GP4 are used for the physical buttons and GP8/GP9 are free on both Pico boards. GP16/GP17 are already used by the Pico-to-Pro-Micro UART.
 
 For the test pair:
 
