@@ -10,6 +10,16 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 pico_sdk_init()
 
+# The firmware is C-only. Avoid linking the SDK C++ new/delete shim, which
+# requires the separate ARM libstdc++ package and is unused by this target.
+if(TARGET pico_cxx_options)
+    get_target_property(PICO_CXX_OPTION_SOURCES pico_cxx_options INTERFACE_SOURCES)
+    if(PICO_CXX_OPTION_SOURCES)
+        list(FILTER PICO_CXX_OPTION_SOURCES EXCLUDE REGEX "/new_delete\\.cpp$")
+        set_property(TARGET pico_cxx_options PROPERTY INTERFACE_SOURCES "${PICO_CXX_OPTION_SOURCES}")
+    endif()
+endif()
+
 add_executable(smz_hid_client
     hid_client.c
     usb_descriptors.c
