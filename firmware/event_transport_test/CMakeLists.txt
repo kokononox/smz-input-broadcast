@@ -5,7 +5,7 @@ if(NOT DEFINED ENV{PICO_SDK_PATH})
 endif()
 
 include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
-project(smz_event_transport_test C CXX ASM)
+project(smz_event_transport_test C ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 pico_sdk_init()
