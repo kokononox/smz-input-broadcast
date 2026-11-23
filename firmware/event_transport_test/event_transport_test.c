@@ -38,6 +38,12 @@
 #define TEST_PATTERN1 0x5Au
 #define TEST_PATTERN2 0xC3u
 
+/* Capture-only event kinds. The client validates and ACKs these; it never emits HID. */
+#define INPUT_EVENT_KIND_KEY 0x01u
+#define INPUT_EVENT_KIND_MOUSE_MOVE 0x02u
+#define INPUT_EVENT_KIND_MOUSE_BUTTON 0x03u
+#define INPUT_EVENT_KIND_MOUSE_WHEEL 0x04u
+
 #define EVENT_INTERVAL_US 20000u
 #define ACK_TIMEOUT_US 100000u
 #define REPORT_INTERVAL_US 1000000u
@@ -195,15 +201,40 @@ static void init_link_uart(void) {
 }
 
 #if defined(EVENT_TEST_CLIENT) || defined(EVENT_TEST_HOST_MASTER)
-static bool is_valid_test_event(const Frame *frame) {
-    if (frame->type != FRAME_TYPE_EVENT || frame->payload_length != TEST_PAYLOAD_SIZE) {
+static bool is_valid_event(const Frame *frame) {
+    if (frame->type != FRAME_TYPE_EVENT || frame->payload_length == 0u) {
         return false;
     }
-    return frame->payload[0] == TEST_EVENT_KIND &&
-           get_u32_le(&frame->payload[1]) == (uint32_t)frame->sequence &&
-           frame->payload[5] == TEST_PATTERN0 &&
-           frame->payload[6] == TEST_PATTERN1 &&
-           frame->payload[7] == TEST_PATTERN2;
+
+    /* Keep the existing deterministic transport-test event for regression tests. */
+    if (frame->payload[0] == TEST_EVENT_KIND) {
+        return frame->payload_length == TEST_PAYLOAD_SIZE &&
+               get_u32_le(&frame->payload[1]) == (uint32_t)frame->sequence &&
+               frame->payload[5] == TEST_PATTERN0 &&
+               frame->payload[6] == TEST_PATTERN1 &&
+               frame->payload[7] == TEST_PATTERN2;
+    }
+
+    /* Capture-only wire schema. Payloads are validated, never displayed or executed. */
+    switch (frame->payload[0]) {
+        case INPUT_EVENT_KIND_KEY:
+            /* kind, scan-code LE16, down(1)/up(0), extended(0/1) */
+            return frame->payload_length == 5u &&
+                   frame->payload[3] <= 1u && frame->payload[4] <= 1u;
+        case INPUT_EVENT_KIND_MOUSE_MOVE:
+            /* kind, dx LE16, dy LE16 */
+            return frame->payload_length == 5u;
+        case INPUT_EVENT_KIND_MOUSE_BUTTON:
+            /* kind, button(1..5), down(1)/up(0) */
+            return frame->payload_length == 3u &&
+                   frame->payload[1] >= 1u && frame->payload[1] <= 5u &&
+                   frame->payload[2] <= 1u;
+        case INPUT_EVENT_KIND_MOUSE_WHEEL:
+            /* kind, delta LE16, axis(0 vertical / 1 horizontal) */
+            return frame->payload_length == 4u && frame->payload[3] <= 1u;
+        default:
+            return false;
+    }
 }
 #endif
 
@@ -342,7 +373,7 @@ static void run_host_master(void) {
         }
 
         while (read_host_frame(&host_parser, &frame)) {
-            if (!is_valid_test_event(&frame)) {
+            if (!is_valid_event(&frame)) {
                 invalid_events++;
                 continue;
             }
@@ -409,7 +440,7 @@ static void run_client(void) {
     while (true) {
         Frame frame;
         while (read_frame(&parser, &frame)) {
-            if (!is_valid_test_event(&frame)) {
+            if (!is_valid_event(&frame)) {
                 invalid_events++;
                 continue;
             }
