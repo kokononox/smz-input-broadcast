@@ -18,6 +18,8 @@ internal static class Program
 
 internal sealed class MonitorForm : Form
 {
+    // 1 ms matches the full-speed HID endpoint polling interval; Windows and the link may deliver less.
+    private const int CaptureIntervalMs = 1;
     private readonly ComboBox _ports = new();
     private readonly Button _refreshButton = new();
     private readonly Button _connectButton = new();
@@ -46,6 +48,7 @@ internal sealed class MonitorForm : Form
     private bool _captureTimerResolutionActive;
     private int _eventSequence;
     private int _syntheticSendInProgress;
+    private int _captureSendInProgress;
     private volatile bool _captureOnlyRunning;
     private int _captureDropped;
     private int _captureSent;
@@ -416,7 +419,8 @@ internal sealed class MonitorForm : Form
             _captureOnlyButton.Text = "توقف ارسال HID";
             _syntheticButton.Enabled = false;
             AppendLog("--- ارسال HID روشن شد؛ اجرای ورودی فقط با جامپر فیزیکی کلاینت فعال است ---");
-            _captureTimer.Change(0, 20);
+            AppendLog($"--- نرخ هدف ارسال: حداکثر {1000 / CaptureIntervalMs}Hz (بازهٔ {CaptureIntervalMs}ms؛ نرخ واقعی به زمان‌بندی Windows، USB و لینک بستگی دارد) ---");
+            _captureTimer.Change(0, CaptureIntervalMs);
         }
         catch (Exception ex)
         {
@@ -467,49 +471,61 @@ internal sealed class MonitorForm : Form
 
     private void SendCaptureFrame(object? state)
     {
-        lock (_serialWriteLock)
-        {
-            if (!_captureOnlyRunning)
-                return;
+        // Timer callbacks can overlap at a 1 ms period. Skip a tick rather than
+        // queueing concurrent serial writes; raw mouse deltas remain coalesced.
+        if (Interlocked.Exchange(ref _captureSendInProgress, 1) != 0)
+            return;
 
-            byte[]? payload = null;
-            lock (_captureQueueLock)
+        try
+        {
+            lock (_serialWriteLock)
             {
-                if (_captureQueue.Count > 0)
+                if (!_captureOnlyRunning)
+                    return;
+
+                byte[]? payload = null;
+                lock (_captureQueueLock)
                 {
-                    payload = _captureQueue.First!.Value;
-                    _captureQueue.RemoveFirst();
+                    if (_captureQueue.Count > 0)
+                    {
+                        payload = _captureQueue.First!.Value;
+                        _captureQueue.RemoveFirst();
+                    }
+                }
+                if (payload is null)
+                {
+                    long nowTicks = Stopwatch.GetTimestamp();
+                    long lastTicks = Interlocked.Read(ref _lastCaptureHeartbeatTicks);
+                    if ((nowTicks - lastTicks) * 1000L / Stopwatch.Frequency < 100L)
+                        return;
+                    payload = new byte[] { 0x05 }; // heartbeat keeps client watchdog alive
+                }
+
+                SerialPort? serial = _serial;
+                if (serial is null || !serial.IsOpen)
+                {
+                    QueueCaptureOnlyStop("پورت سریال بسته شد؛ ارسال HID متوقف شد.");
+                    return;
+                }
+
+                try
+                {
+                    ushort sequence = unchecked((ushort)Interlocked.Increment(ref _eventSequence));
+                    uint timestampUs = unchecked((uint)(Stopwatch.GetTimestamp() * 1_000_000L / Stopwatch.Frequency));
+                    byte[] frame = BuildEventFrame(sequence, timestampUs, payload);
+                    serial.Write(frame, 0, frame.Length);
+                    Interlocked.Exchange(ref _lastCaptureHeartbeatTicks, Stopwatch.GetTimestamp());
+                    Interlocked.Increment(ref _captureSent);
+                }
+                catch (Exception ex)
+                {
+                    QueueCaptureOnlyStop("ارسال HID متوقف شد: " + ex.Message);
                 }
             }
-            if (payload is null)
-            {
-                long nowTicks = Stopwatch.GetTimestamp();
-                long lastTicks = Interlocked.Read(ref _lastCaptureHeartbeatTicks);
-                if ((nowTicks - lastTicks) * 1000L / Stopwatch.Frequency < 100L)
-                    return;
-                payload = new byte[] { 0x05 }; // heartbeat keeps client watchdog alive
-            }
-
-            SerialPort? serial = _serial;
-            if (serial is null || !serial.IsOpen)
-            {
-                QueueCaptureOnlyStop("پورت سریال بسته شد؛ ارسال HID متوقف شد.");
-                return;
-            }
-
-            try
-            {
-                ushort sequence = unchecked((ushort)Interlocked.Increment(ref _eventSequence));
-                uint timestampUs = unchecked((uint)(Stopwatch.GetTimestamp() * 1_000_000L / Stopwatch.Frequency));
-                byte[] frame = BuildEventFrame(sequence, timestampUs, payload);
-                serial.Write(frame, 0, frame.Length);
-                Interlocked.Exchange(ref _lastCaptureHeartbeatTicks, Stopwatch.GetTimestamp());
-                Interlocked.Increment(ref _captureSent);
-            }
-            catch (Exception ex)
-            {
-                QueueCaptureOnlyStop("ارسال HID متوقف شد: " + ex.Message);
-            }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _captureSendInProgress, 0);
         }
     }
 
