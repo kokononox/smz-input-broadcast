@@ -9,7 +9,7 @@ on:
       - "firmware/hid_client/**"
       - "firmware/one_way_mirror_overlay/**"
       - "tests/**"
-      - "tools/apply_mirror_overlay.py"
+      - "scripts/apply_mirror_overlay.py"
       - "docs/ONE_WAY_MIRROR_DUAL_SENSOR.fa.md"
       - ".github/workflows/build-mirror-broadcast.yml"
 
@@ -75,7 +75,7 @@ jobs:
           cmake -S firmware/event_transport_test -B build/event-client -G Ninja -DPICO_BOARD=pico -DEVENT_TEST_ROLE=CLIENT
           cmake --build build/event-client --parallel 2
       - name: Apply one-way overlay to pinned dual-sensor firmware
-        run: python tools/apply_mirror_overlay.py classroom-studio-source
+        run: python scripts/apply_mirror_overlay.py classroom-studio-source
       - name: Compile dual-sensor smoke program and build master UF2
         working-directory: classroom-studio-source
         run: |
