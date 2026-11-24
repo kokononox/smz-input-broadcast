@@ -236,7 +236,11 @@ internal readonly record struct MouseSettings(int PointerSpeed, int Threshold1, 
 
     [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", ExactSpelling = true, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SystemParametersInfoSpeed(uint action, uint param, ref int value, uint flags);
+    private static extern bool SystemParametersInfoGetSpeed(uint action, uint param, ref int value, uint flags);
+
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW", ExactSpelling = true, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SystemParametersInfoSetSpeed(uint action, uint param, IntPtr value, uint flags);
 
     public static MouseSettings Read()
     {
@@ -245,7 +249,7 @@ internal readonly record struct MouseSettings(int PointerSpeed, int Threshold1, 
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows mouse acceleration settings could not be read.");
 
         int speed = 0;
-        if (!SystemParametersInfoSpeed(SpiGetMouseSpeed, 0, ref speed, 0))
+        if (!SystemParametersInfoGetSpeed(SpiGetMouseSpeed, 0, ref speed, 0))
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows pointer speed could not be read.");
 
         return new MouseSettings(speed, acceleration.Threshold1, acceleration.Threshold2, acceleration.Acceleration);
@@ -263,8 +267,7 @@ internal readonly record struct MouseSettings(int PointerSpeed, int Threshold1, 
         if (!SystemParametersInfoMouse(SpiSetMouse, 0, ref acceleration, flags))
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows mouse acceleration settings could not be changed.");
 
-        int speed = PointerSpeed;
-        if (!SystemParametersInfoSpeed(SpiSetMouseSpeed, 0, ref speed, flags))
+        if (!SystemParametersInfoSetSpeed(SpiSetMouseSpeed, 0, new IntPtr(PointerSpeed), flags))
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows pointer speed could not be changed.");
     }
 }
