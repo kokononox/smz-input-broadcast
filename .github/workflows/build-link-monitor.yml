@@ -3,7 +3,7 @@ name: Build SMZ Link Monitor
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, feature/one-way-mirror-broadcast]
     paths:
       - "tools/link-monitor/**"
       - ".github/workflows/build-link-monitor.yml"

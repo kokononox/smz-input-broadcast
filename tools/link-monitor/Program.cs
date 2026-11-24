@@ -636,8 +636,11 @@ internal sealed class MonitorForm : Form
         if (!line.StartsWith("MASTER,", StringComparison.Ordinal))
             return;
 
+        string[] fields = line.Split(',').Skip(1).ToArray();
+        string mode = fields.FirstOrDefault(part => part.StartsWith("mode=", StringComparison.OrdinalIgnoreCase))?[5..] ?? "";
+        bool mirrorMode = string.Equals(mode, "mirror", StringComparison.OrdinalIgnoreCase);
         var values = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-        foreach (string part in line.Split(',').Skip(1))
+        foreach (string part in fields)
         {
             int equals = part.IndexOf('=');
             if (equals <= 0)
@@ -650,14 +653,36 @@ internal sealed class MonitorForm : Form
         long ack = Get(values, "ack");
         long timeout = Get(values, "timeout");
         long crc = Get(values, "crc");
+        long invalid = Get(values, "invalid");
+        long hostRx = Get(values, "host_rx");
+        long hostCrc = Get(values, "host_crc");
         long min = Get(values, "rtt_us_min");
         long avg = Get(values, "rtt_us_avg");
         long max = Get(values, "rtt_us_max");
 
-        _counts.Text = $"گزارش حدود یک‌ثانیه‌ای: ارسال {tx} | پاسخ {ack} | timeout {timeout} | CRC {crc}";
-        _rtt.Text = ack > 0 ? $"زمان رفت‌وبرگشت (RTT): کمینه {min} µs | میانگین {avg} µs | بیشینه {max} µs" : "RTT: هنوز پاسخ معتبر دریافت نشده";
+        _counts.Text = mirrorMode
+            ? $"گزارش آینه‌ای: دریافت {hostRx} | پخش {tx} | ACK غیرفعال | invalid {invalid}"
+            : $"گزارش حدود یک‌ثانیه‌ای: ارسال {tx} | پاسخ {ack} | timeout {timeout} | CRC {crc}";
+        _rtt.Text = mirrorMode
+            ? "حالت آینه یک‌طرفه است؛ ACK و RTT اندازه‌گیری نمی‌شوند"
+            : ack > 0 ? $"زمان رفت‌وبرگشت (RTT): کمینه {min} µs | میانگین {avg} µs | بیشینه {max} µs" : "RTT: هنوز پاسخ معتبر دریافت نشده";
         _lastReportUtc = DateTime.UtcNow;
         _sawMasterReport = true;
+
+        if (mirrorMode)
+        {
+            if (invalid > 0 || hostCrc > 0)
+            {
+                _latestLinkStatus = "حالت آینه فعال است، اما فریم نامعتبر یا خطای CRC دیده شد";
+                SetLinkStatus(_latestLinkStatus, System.Drawing.Color.DarkOrange);
+            }
+            else
+            {
+                _latestLinkStatus = "پخش آینه‌ای یک‌طرفه فعال است؛ دریافت هر کلاینت جداگانه تأیید نمی‌شود";
+                SetLinkStatus(_latestLinkStatus, System.Drawing.Color.DarkGreen);
+            }
+            return;
+        }
 
         if (ack == 0 && tx > 0)
         {

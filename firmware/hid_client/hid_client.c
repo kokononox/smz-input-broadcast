@@ -21,6 +21,9 @@
 #define FRAME_VERSION 1u
 #define FRAME_TYPE_EVENT 1u
 #define FRAME_TYPE_ACK 2u
+#ifndef HID_CLIENT_SEND_ACK
+#define HID_CLIENT_SEND_ACK 1
+#endif
 #define FRAME_HEADER_SIZE 11u
 #define FRAME_CRC_SIZE 2u
 #define MAX_PAYLOAD_SIZE 16u
@@ -78,6 +81,7 @@ static uint32_t get_u32_le(uint8_t const *p) {
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+#if HID_CLIENT_SEND_ACK
 static void put_u16_le(uint8_t *p, uint16_t value) {
     p[0] = (uint8_t)value;
     p[1] = (uint8_t)(value >> 8);
@@ -89,6 +93,7 @@ static void put_u32_le(uint8_t *p, uint32_t value) {
     p[2] = (uint8_t)(value >> 16);
     p[3] = (uint8_t)(value >> 24);
 }
+#endif
 
 static uint16_t crc16_ccitt(uint8_t const *data, size_t length) {
     uint16_t crc = 0xFFFFu;
@@ -103,6 +108,7 @@ static uint16_t crc16_ccitt(uint8_t const *data, size_t length) {
     return crc;
 }
 
+#if HID_CLIENT_SEND_ACK
 static void send_frame(uint8_t type, uint16_t sequence, uint32_t timestamp_us,
                        uint8_t const *payload, uint8_t payload_length) {
     uint8_t bytes[MAX_FRAME_SIZE];
@@ -119,6 +125,7 @@ static void send_frame(uint8_t type, uint16_t sequence, uint32_t timestamp_us,
     uart_write_blocking(LINK_UART, bytes,
                         FRAME_HEADER_SIZE + payload_length + FRAME_CRC_SIZE);
 }
+#endif
 
 static bool parser_feed(FrameParser *parser, uint8_t byte, Frame *frame) {
     if (parser->count == 0u) {
@@ -443,7 +450,9 @@ int main(void) {
     gpio_put(LED_PIN, false);
 
     uart_init(LINK_UART, LINK_BAUD);
+#if HID_CLIENT_SEND_ACK
     gpio_set_function(LINK_TX_PIN, GPIO_FUNC_UART);
+#endif
     gpio_set_function(LINK_RX_PIN, GPIO_FUNC_UART);
     uart_set_hw_flow(LINK_UART, false, false);
     uart_set_format(LINK_UART, 8u, 1u, UART_PARITY_NONE);
@@ -491,7 +500,9 @@ int main(void) {
             last_valid_event_us = time_us_32();
             link_timed_out = false;
             if (armed && frame.payload[0] != EVENT_HEARTBEAT) process_event(&frame);
+#if HID_CLIENT_SEND_ACK
             send_frame(FRAME_TYPE_ACK, frame.sequence, frame.timestamp_us, NULL, 0u);
+#endif
         }
 
         now_us = time_us_32();

@@ -1,0 +1,56 @@
+name: Build one-way mirror firmware
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, feature/one-way-mirror-broadcast]
+    paths:
+      - "firmware/event_transport_test/**"
+      - "firmware/hid_client/**"
+      - "firmware/event_transport_test/HOST_BRIDGE_TEST.fa.md"
+      - ".github/workflows/build-mirror-broadcast.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-uf2:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+      - name: Check out Pico SDK
+        uses: actions/checkout@v4
+        with:
+          repository: raspberrypi/pico-sdk
+          ref: 2.3.1
+          path: pico-sdk
+          submodules: recursive
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y gcc-arm-none-eabi libnewlib-arm-none-eabi cmake ninja-build
+      - name: Configure Pico SDK path
+        run: echo "PICO_SDK_PATH=$GITHUB_WORKSPACE/pico-sdk" >> "$GITHUB_ENV"
+      - name: Build one-way mirror master
+        run: |
+          cmake -S firmware/event_transport_test -B build/mirror-master -G Ninja -DPICO_BOARD=pico -DEVENT_TEST_ROLE=HOST_MIRROR
+          cmake --build build/mirror-master --parallel 2
+      - name: Build no-ACK HID client
+        run: |
+          cmake -S firmware/hid_client -B build/hid-client-mirror -G Ninja -DPICO_BOARD=pico -DHID_CLIENT_SEND_ACK=OFF
+          cmake --build build/hid-client-mirror --parallel 2
+      - name: Build serial-visible receiver for safe fan-out validation
+        run: |
+          cmake -S firmware/event_transport_test -B build/event-client -G Ninja -DPICO_BOARD=pico -DEVENT_TEST_ROLE=CLIENT
+          cmake --build build/event-client --parallel 2
+      - name: Upload one-way mirror UF2 files
+        uses: actions/upload-artifact@v4
+        with:
+          name: SMZ-One-Way-Mirror-Firmware
+          path: |
+            build/mirror-master/smz_event_transport_test.uf2
+            build/hid-client-mirror/smz_hid_client.uf2
+            build/event-client/smz_event_transport_test.uf2
+          if-no-files-found: error
+          retention-days: 14

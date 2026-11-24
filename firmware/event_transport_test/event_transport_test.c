@@ -9,12 +9,16 @@
 #include "pico/stdlib.h"
 #include "pico/stdio.h"
 
-#if defined(EVENT_TEST_MASTER) || defined(EVENT_TEST_HOST_MASTER)
+#if defined(EVENT_TEST_MASTER)
 #define ROLE_NAME "MASTER"
+#elif defined(EVENT_TEST_HOST_MASTER)
+#define ROLE_NAME "HOST_MASTER"
+#elif defined(EVENT_TEST_HOST_MIRROR_MASTER)
+#define ROLE_NAME "HOST_MIRROR_MASTER"
 #elif defined(EVENT_TEST_CLIENT)
 #define ROLE_NAME "CLIENT"
 #else
-#error "Build with EVENT_TEST_ROLE=MASTER, CLIENT, or HOST_MASTER"
+#error "Build with EVENT_TEST_ROLE=MASTER, CLIENT, HOST_MASTER, or HOST_MIRROR"
 #endif
 
 #define LINK_UART uart1
@@ -182,6 +186,7 @@ static bool parser_feed(FrameParser *parser, uint8_t byte, Frame *frame) {
     return true;
 }
 
+#if !defined(EVENT_TEST_HOST_MIRROR_MASTER)
 static bool read_frame(FrameParser *parser, Frame *frame) {
     while (uart_is_readable(LINK_UART)) {
         const uint8_t byte = (uint8_t)uart_getc(LINK_UART);
@@ -191,6 +196,7 @@ static bool read_frame(FrameParser *parser, Frame *frame) {
     }
     return false;
 }
+#endif
 
 static void init_link_uart(void) {
     uart_init(LINK_UART, LINK_BAUD);
@@ -201,7 +207,7 @@ static void init_link_uart(void) {
     uart_set_fifo_enabled(LINK_UART, true);
 }
 
-#if defined(EVENT_TEST_CLIENT) || defined(EVENT_TEST_HOST_MASTER)
+#if defined(EVENT_TEST_CLIENT) || defined(EVENT_TEST_HOST_MASTER) || defined(EVENT_TEST_HOST_MIRROR_MASTER)
 static bool is_valid_event(const Frame *frame) {
     if (frame->type != FRAME_TYPE_EVENT || frame->payload_length == 0u) {
         return false;
@@ -242,7 +248,7 @@ static bool is_valid_event(const Frame *frame) {
 }
 #endif
 
-#ifdef EVENT_TEST_HOST_MASTER
+#if defined(EVENT_TEST_HOST_MASTER) || defined(EVENT_TEST_HOST_MIRROR_MASTER)
 static bool read_host_frame(FrameParser *parser, Frame *frame) {
     while (true) {
         const int value = getchar_timeout_us(0);
@@ -427,6 +433,47 @@ static void run_host_master(void) {
         tight_loop_contents();
     }
 }
+#elif defined(EVENT_TEST_HOST_MIRROR_MASTER)
+static void run_host_mirror_master(void) {
+    FrameParser host_parser = {0};
+    uint32_t last_report_us = time_us_32();
+    uint32_t host_frames = 0u;
+    uint32_t events_sent = 0u;
+    uint32_t invalid_events = 0u;
+
+    printf("SMZ one-way mirror bridge: %s, USB CDC -> UART1 %lu baud, GP%u TX -> client RX fan-out; ACK disabled\n",
+           ROLE_NAME, (unsigned long)LINK_BAUD, LINK_TX_PIN);
+
+    while (true) {
+        Frame frame;
+        while (read_host_frame(&host_parser, &frame)) {
+            if (!is_valid_event(&frame)) {
+                invalid_events++;
+                continue;
+            }
+
+            /* Broadcast the same validated event to every client RX connected
+             * to this TX line. No client response is required or consumed. */
+            send_frame(FRAME_TYPE_EVENT, frame.sequence, frame.timestamp_us,
+                       frame.payload, frame.payload_length);
+            host_frames++;
+            events_sent++;
+        }
+
+        const uint32_t now_us = time_us_32();
+        if ((uint32_t)(now_us - last_report_us) >= REPORT_INTERVAL_US) {
+            printf("MASTER,mode=mirror,host_rx=%lu,tx=%lu,ack=0,timeout=0,busy=0,invalid=%lu,host_crc=%lu\n",
+                   (unsigned long)host_frames, (unsigned long)events_sent,
+                   (unsigned long)invalid_events,
+                   (unsigned long)host_parser.crc_errors);
+            host_frames = 0u;
+            events_sent = 0u;
+            invalid_events = 0u;
+            last_report_us = now_us;
+        }
+        tight_loop_contents();
+    }
+}
 #else
 static void run_client(void) {
     FrameParser parser = {0};
@@ -483,6 +530,8 @@ int main(void) {
     run_master();
 #elif defined(EVENT_TEST_HOST_MASTER)
     run_host_master();
+#elif defined(EVENT_TEST_HOST_MIRROR_MASTER)
+    run_host_mirror_master();
 #else
     run_client();
 #endif

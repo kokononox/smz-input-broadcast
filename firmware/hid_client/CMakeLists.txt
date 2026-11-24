@@ -8,6 +8,7 @@ include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 project(smz_hid_client C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+option(HID_CLIENT_SEND_ACK "Send UART acknowledgements to the master" ON)
 pico_sdk_init()
 
 # The firmware is C-only. Avoid linking the SDK C++ new/delete shim, which
@@ -26,6 +27,11 @@ add_executable(smz_hid_client
 )
 
 target_include_directories(smz_hid_client PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+if(HID_CLIENT_SEND_ACK)
+    target_compile_definitions(smz_hid_client PRIVATE HID_CLIENT_SEND_ACK=1)
+else()
+    target_compile_definitions(smz_hid_client PRIVATE HID_CLIENT_SEND_ACK=0)
+endif()
 target_compile_options(smz_hid_client PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(smz_hid_client PRIVATE pico_stdlib hardware_uart tinyusb_device tinyusb_board)
 
