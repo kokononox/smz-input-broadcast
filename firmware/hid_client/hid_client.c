@@ -34,6 +34,7 @@
 #define EVENT_MOUSE_BUTTON 0x03u
 #define EVENT_MOUSE_WHEEL 0x04u
 #define EVENT_HEARTBEAT 0x05u
+#define EVENT_STATE_SNAPSHOT 0x07u
 #define TEST_EVENT_KIND 0x7Eu
 #define TEST_PAYLOAD_SIZE 8u
 #define TEST_PATTERN0 0xA5u
@@ -206,6 +207,12 @@ static bool valid_event(Frame const *frame) {
             return frame->payload_length == 4u && frame->payload[3] <= 1u;
         case EVENT_HEARTBEAT:
             return frame->payload_length == 1u;
+        case EVENT_STATE_SNAPSHOT:
+            if (frame->payload_length != 9u || (frame->payload[8] & 0xE0u) != 0u) return false;
+            for (unsigned i = 2u; i < 8u; ++i) {
+                if (frame->payload[i] >= 0xE0u) return false;
+            }
+            return true;
         default:
             return false;
     }
@@ -324,6 +331,31 @@ static int32_t clamp_add(int32_t current, int32_t amount, int32_t limit) {
     return (int32_t)sum;
 }
 
+static void handle_state_snapshot(uint8_t const *payload) {
+    bool next_keys[256] = { false };
+    for (unsigned i = 0u; i < 6u; ++i) {
+        uint8_t usage = payload[2u + i];
+        if (usage > 0u && usage < 0xE0u) next_keys[usage] = true;
+    }
+    bool keyboard_changed = modifiers != payload[1];
+    for (unsigned usage = 1u; usage < 256u; ++usage) {
+        if (key_down[usage] != next_keys[usage]) {
+            keyboard_changed = true;
+            break;
+        }
+    }
+    if (keyboard_changed) {
+        modifiers = payload[1];
+        memcpy(key_down, next_keys, sizeof(key_down));
+        keyboard_dirty = true;
+    }
+    uint8_t next_buttons = (uint8_t)(payload[8] & 0x1Fu);
+    if (mouse_buttons != next_buttons) {
+        mouse_buttons = next_buttons;
+        mouse_dirty = true;
+    }
+}
+
 static void process_event(Frame const *frame) {
     uint8_t const *p = frame->payload;
     switch (p[0]) {
@@ -354,6 +386,9 @@ static void process_event(Frame const *frame) {
             mouse_dirty = true;
             break;
         }
+        case EVENT_STATE_SNAPSHOT:
+            handle_state_snapshot(p);
+            break;
         default:
             break; /* Heartbeat keeps the watchdog alive but has no HID effect. */
     }

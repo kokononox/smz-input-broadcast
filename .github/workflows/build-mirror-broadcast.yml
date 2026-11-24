@@ -7,7 +7,10 @@ on:
     paths:
       - "firmware/event_transport_test/**"
       - "firmware/hid_client/**"
-      - "firmware/event_transport_test/HOST_BRIDGE_TEST.fa.md"
+      - "firmware/one_way_mirror_overlay/**"
+      - "tests/**"
+      - "tools/apply_mirror_overlay.py"
+      - "docs/ONE_WAY_MIRROR_DUAL_SENSOR.fa.md"
       - ".github/workflows/build-mirror-broadcast.yml"
 
 permissions:
@@ -17,8 +20,14 @@ jobs:
   build-uf2:
     runs-on: ubuntu-24.04
     steps:
-      - name: Check out project
+      - name: Check out mirror project
         uses: actions/checkout@v4
+      - name: Check out pinned two-sensor Classroom Studio source
+        uses: actions/checkout@v4
+        with:
+          repository: kokononox/smz
+          ref: dc81e1d8f6202ac28cc3f086f921b5c3e339ef88
+          path: classroom-studio-source
       - name: Check out Pico SDK
         uses: actions/checkout@v4
         with:
@@ -26,13 +35,34 @@ jobs:
           ref: 2.3.1
           path: pico-sdk
           submodules: recursive
-      - name: Install ARM toolchain
+      - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y gcc-arm-none-eabi libnewlib-arm-none-eabi cmake ninja-build
+          sudo apt-get install --no-install-recommends -y cmake ninja-build
+      - name: Install ARM GNU Toolchain 14.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/arm-gnu-toolchain.tar.xz"
+          install_dir="$RUNNER_TEMP/arm-gnu-toolchain-14.2.rel1"
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 5 \
+            --connect-timeout 30 --max-time 600 \
+            --output "$archive" \
+            'https://developer.arm.com/-/media/Files/downloads/gnu/14.2.rel1/binrel/arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi.tar.xz'
+          mkdir -p "$install_dir"
+          tar -xJf "$archive" -C "$install_dir" --strip-components=1
+          echo "$install_dir/bin" >> "$GITHUB_PATH"
+          "$install_dir/bin/arm-none-eabi-gcc" --version
       - name: Configure Pico SDK path
         run: echo "PICO_SDK_PATH=$GITHUB_WORKSPACE/pico-sdk" >> "$GITHUB_ENV"
-      - name: Build one-way mirror master
+      - name: Run mirror frame and event host test
+        run: |
+          gcc -std=c11 -Wall -Wextra -Werror \
+            -Itests/host_stubs -Ifirmware/one_way_mirror_overlay \
+            tests/mirror_link_host_test.c firmware/one_way_mirror_overlay/mirror_link.c \
+            -o "$RUNNER_TEMP/mirror-link-host-test"
+          "$RUNNER_TEMP/mirror-link-host-test"
+      - name: Build one-way mirror master transport test
         run: |
           cmake -S firmware/event_transport_test -B build/mirror-master -G Ninja -DPICO_BOARD=pico -DEVENT_TEST_ROLE=HOST_MIRROR
           cmake --build build/mirror-master --parallel 2
@@ -40,17 +70,35 @@ jobs:
         run: |
           cmake -S firmware/hid_client -B build/hid-client-mirror -G Ninja -DPICO_BOARD=pico -DHID_CLIENT_SEND_ACK=OFF
           cmake --build build/hid-client-mirror --parallel 2
-      - name: Build serial-visible receiver for safe fan-out validation
+      - name: Build serial-visible receiver for fan-out validation
         run: |
           cmake -S firmware/event_transport_test -B build/event-client -G Ninja -DPICO_BOARD=pico -DEVENT_TEST_ROLE=CLIENT
           cmake --build build/event-client --parallel 2
-      - name: Upload one-way mirror UF2 files
+      - name: Apply one-way overlay to pinned dual-sensor firmware
+        run: python tools/apply_mirror_overlay.py classroom-studio-source
+      - name: Compile dual-sensor smoke program and build master UF2
+        working-directory: classroom-studio-source
+        run: |
+          set -euo pipefail
+          python tools/abvm.py compile firmware/abvm/tests/abvm_dual_guard_smoke.amsj "$RUNNER_TEMP/dual-guard-smoke.abp" --routes Desktop Restart Startup LoginOrDc Dc CharacterDashboard EnteringGameLoading Game Targeted TargetedRepeat Whisper WhisperRepeat Finish
+          cmake -S firmware/abvm/pico -B "$RUNNER_TEMP/classroom-studio-mirror" -G Ninja \
+            -DPICO_BOARD=pico \
+            -DABVM_PROGRAM="$RUNNER_TEMP/dual-guard-smoke.abp"
+          cmake --build "$RUNNER_TEMP/classroom-studio-mirror" --parallel 2
+          test -s "$RUNNER_TEMP/classroom-studio-mirror/ams_abvm_pico.uf2"
+          arm-none-eabi-size "$RUNNER_TEMP/classroom-studio-mirror/ams_abvm_pico.elf"
+          mkdir -p "$GITHUB_WORKSPACE/build/classroom-studio-dual-sensor"
+          cp "$RUNNER_TEMP/classroom-studio-mirror/ams_abvm_pico.uf2" "$GITHUB_WORKSPACE/build/classroom-studio-dual-sensor/classroom-studio-dual-sensor-mirror-smoke.uf2"
+          cp "$RUNNER_TEMP/classroom-studio-mirror/ams_abvm_pico.elf" "$GITHUB_WORKSPACE/build/classroom-studio-dual-sensor/"
+          cp "$RUNNER_TEMP/dual-guard-smoke.abp" "$GITHUB_WORKSPACE/build/classroom-studio-dual-sensor/"
+      - name: Upload mirror firmware UF2s
         uses: actions/upload-artifact@v4
         with:
-          name: SMZ-One-Way-Mirror-Firmware
+          name: classroom-studio-one-way-mirror-firmware
           path: |
             build/mirror-master/smz_event_transport_test.uf2
             build/hid-client-mirror/smz_hid_client.uf2
             build/event-client/smz_event_transport_test.uf2
+            build/classroom-studio-dual-sensor/**
           if-no-files-found: error
           retention-days: 14

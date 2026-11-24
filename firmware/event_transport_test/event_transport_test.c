@@ -48,6 +48,7 @@
 #define INPUT_EVENT_KIND_MOUSE_BUTTON 0x03u
 #define INPUT_EVENT_KIND_MOUSE_WHEEL 0x04u
 #define INPUT_EVENT_KIND_HEARTBEAT 0x05u
+#define INPUT_EVENT_KIND_STATE_SNAPSHOT 0x07u
 
 #define EVENT_INTERVAL_US 20000u
 #define ACK_TIMEOUT_US 100000u
@@ -242,6 +243,13 @@ static bool is_valid_event(const Frame *frame) {
         case INPUT_EVENT_KIND_HEARTBEAT:
             /* kind only; keeps the armed HID client's link watchdog alive */
             return frame->payload_length == 1u;
+        case INPUT_EVENT_KIND_STATE_SNAPSHOT:
+            /* kind, modifiers, six HID usages, mouse-button bitmask */
+            if (frame->payload_length != 9u || (frame->payload[8] & 0xE0u) != 0u) return false;
+            for (unsigned i = 2u; i < 8u; ++i) {
+                if (frame->payload[i] >= 0xE0u) return false;
+            }
+            return true;
         default:
             return false;
     }
