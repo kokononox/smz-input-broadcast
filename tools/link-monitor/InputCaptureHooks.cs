@@ -2,16 +2,27 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-// Keyboard hooks and mouse Raw Input are installed only while the user has
-// explicitly enabled capture mode. Payloads are transient and are not persisted.
+// Keyboard/mouse-button hooks and mouse Raw Input are installed only while the user has
+// explicitly enabled capture mode. Movement uses raw deltas; button/wheel events use hooks.
 internal sealed class InputCaptureHooks : IDisposable
 {
     private const int WhKeyboardLl = 13;
+    private const int WhMouseLl = 14;
     private const int WmKeyDown = 0x0100;
     private const int WmKeyUp = 0x0101;
     private const int WmSysKeyDown = 0x0104;
     private const int WmSysKeyUp = 0x0105;
     private const int WmInput = 0x00FF;
+    private const int WmLButtonDown = 0x0201;
+    private const int WmLButtonUp = 0x0202;
+    private const int WmRButtonDown = 0x0204;
+    private const int WmRButtonUp = 0x0205;
+    private const int WmMButtonDown = 0x0207;
+    private const int WmMButtonUp = 0x0208;
+    private const int WmMouseWheel = 0x020A;
+    private const int WmXButtonDown = 0x020B;
+    private const int WmXButtonUp = 0x020C;
+    private const int WmMouseHWheel = 0x020E;
 
     private const uint RidInput = 0x10000003;
     private const uint RimTypeMouse = 0;
@@ -21,18 +32,6 @@ internal sealed class InputCaptureHooks : IDisposable
     private const uint RidevInputSink = 0x00000100;
 
     private const ushort MouseMoveAbsolute = 0x0001;
-    private const ushort MouseLeftButtonDown = 0x0001;
-    private const ushort MouseLeftButtonUp = 0x0002;
-    private const ushort MouseRightButtonDown = 0x0004;
-    private const ushort MouseRightButtonUp = 0x0008;
-    private const ushort MouseMiddleButtonDown = 0x0010;
-    private const ushort MouseMiddleButtonUp = 0x0020;
-    private const ushort MouseButton4Down = 0x0040;
-    private const ushort MouseButton4Up = 0x0080;
-    private const ushort MouseButton5Down = 0x0100;
-    private const ushort MouseButton5Up = 0x0200;
-    private const ushort MouseWheel = 0x0400;
-    private const ushort MouseHWheel = 0x0800;
 
     private const byte KeyEventKind = 0x01;
     private const byte MouseMoveEventKind = 0x02;
@@ -47,6 +46,23 @@ internal sealed class InputCaptureHooks : IDisposable
     {
         public uint VirtualKey;
         public uint ScanCode;
+        public uint Flags;
+        public uint Time;
+        public UIntPtr ExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MouseHookInfo
+    {
+        public NativePoint Point;
+        public uint MouseData;
         public uint Flags;
         public uint Time;
         public UIntPtr ExtraInfo;
@@ -112,7 +128,9 @@ internal sealed class InputCaptureHooks : IDisposable
         uint headerSize);
 
     private readonly HookProc _keyboardCallback;
+    private readonly HookProc _mouseCallback;
     private IntPtr _keyboardHook;
+    private IntPtr _mouseHook;
     private RawInputMessageWindow? _rawInputWindow;
     private bool _rawInputRegistered;
 
@@ -121,11 +139,12 @@ internal sealed class InputCaptureHooks : IDisposable
     public InputCaptureHooks()
     {
         _keyboardCallback = KeyboardCallback;
+        _mouseCallback = MouseCallback;
     }
 
     public void Start()
     {
-        if (_keyboardHook != IntPtr.Zero || _rawInputWindow is not null)
+        if (_keyboardHook != IntPtr.Zero || _mouseHook != IntPtr.Zero || _rawInputWindow is not null)
             throw new InvalidOperationException("Input capture is already active.");
 
         IntPtr module = GetModuleHandle(null);
@@ -135,6 +154,10 @@ internal sealed class InputCaptureHooks : IDisposable
 
         try
         {
+            _mouseHook = SetWindowsHookEx(WhMouseLl, _mouseCallback, module, 0);
+            if (_mouseHook == IntPtr.Zero)
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not install the mouse button capture hook.");
+
             _rawInputWindow = new RawInputMessageWindow(this);
             var devices = new[]
             {
@@ -153,8 +176,28 @@ internal sealed class InputCaptureHooks : IDisposable
         }
         catch
         {
+            if (_rawInputRegistered)
+            {
+                var removeDevices = new[]
+                {
+                    new RawInputDevice
+                    {
+                        UsagePage = HidUsagePageGeneric,
+                        Usage = HidUsageMouse,
+                        Flags = RidevRemove,
+                        Target = IntPtr.Zero
+                    }
+                };
+                RegisterRawInputDevices(removeDevices, (uint)removeDevices.Length, (uint)Marshal.SizeOf<RawInputDevice>());
+                _rawInputRegistered = false;
+            }
             _rawInputWindow?.Destroy();
             _rawInputWindow = null;
+            if (_mouseHook != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(_mouseHook);
+                _mouseHook = IntPtr.Zero;
+            }
             UnhookWindowsHookEx(_keyboardHook);
             _keyboardHook = IntPtr.Zero;
             throw;
@@ -181,6 +224,12 @@ internal sealed class InputCaptureHooks : IDisposable
 
         _rawInputWindow?.Destroy();
         _rawInputWindow = null;
+
+        if (_mouseHook != IntPtr.Zero)
+        {
+            UnhookWindowsHookEx(_mouseHook);
+            _mouseHook = IntPtr.Zero;
+        }
 
         if (_keyboardHook != IntPtr.Zero)
         {
@@ -212,6 +261,33 @@ internal sealed class InputCaptureHooks : IDisposable
             }
         }
         return CallNextHookEx(_keyboardHook, code, wParam, lParam);
+    }
+
+    private IntPtr MouseCallback(int code, IntPtr wParam, IntPtr lParam)
+    {
+        if (code >= 0)
+        {
+            try
+            {
+                int message = wParam.ToInt32();
+                MouseHookInfo info = Marshal.PtrToStructure<MouseHookInfo>(lParam);
+                switch (message)
+                {
+                    case WmLButtonDown: CaptureButton(1, true); break;
+                    case WmLButtonUp: CaptureButton(1, false); break;
+                    case WmRButtonDown: CaptureButton(2, true); break;
+                    case WmRButtonUp: CaptureButton(2, false); break;
+                    case WmMButtonDown: CaptureButton(3, true); break;
+                    case WmMButtonUp: CaptureButton(3, false); break;
+                    case WmXButtonDown: CaptureButton(XButton(info.MouseData), true); break;
+                    case WmXButtonUp: CaptureButton(XButton(info.MouseData), false); break;
+                    case WmMouseWheel: CaptureWheel(info.MouseData, 0); break;
+                    case WmMouseHWheel: CaptureWheel(info.MouseData, 1); break;
+                }
+            }
+            catch { /* Never let a callback exception escape into Windows. */ }
+        }
+        return CallNextHookEx(_mouseHook, code, wParam, lParam);
     }
 
     private void ProcessRawInput(IntPtr rawInput)
@@ -255,20 +331,6 @@ internal sealed class InputCaptureHooks : IDisposable
         // Absolute devices use a different coordinate model and are intentionally ignored here.
         if ((mouse.Flags & MouseMoveAbsolute) == 0)
             CaptureRelativeMove(mouse.LastX, mouse.LastY);
-
-        ushort flags = mouse.ButtonFlags;
-        if ((flags & MouseLeftButtonDown) != 0) CaptureButton(1, true);
-        if ((flags & MouseLeftButtonUp) != 0) CaptureButton(1, false);
-        if ((flags & MouseRightButtonDown) != 0) CaptureButton(2, true);
-        if ((flags & MouseRightButtonUp) != 0) CaptureButton(2, false);
-        if ((flags & MouseMiddleButtonDown) != 0) CaptureButton(3, true);
-        if ((flags & MouseMiddleButtonUp) != 0) CaptureButton(3, false);
-        if ((flags & MouseButton4Down) != 0) CaptureButton(4, true);
-        if ((flags & MouseButton4Up) != 0) CaptureButton(4, false);
-        if ((flags & MouseButton5Down) != 0) CaptureButton(5, true);
-        if ((flags & MouseButton5Up) != 0) CaptureButton(5, false);
-        if ((flags & MouseWheel) != 0) CaptureWheel(unchecked((short)mouse.ButtonData), 0);
-        if ((flags & MouseHWheel) != 0) CaptureWheel(unchecked((short)mouse.ButtonData), 1);
     }
 
     private void CaptureRelativeMove(int dx, int dy)
@@ -289,8 +351,14 @@ internal sealed class InputCaptureHooks : IDisposable
     private void CaptureButton(byte button, bool down) =>
         EventCaptured?.Invoke(new byte[] { MouseButtonEventKind, button, down ? (byte)1 : (byte)0 });
 
-    private void CaptureWheel(short delta, byte axis) =>
+    private void CaptureWheel(uint mouseData, byte axis)
+    {
+        short delta = unchecked((short)(mouseData >> 16));
         EventCaptured?.Invoke(new byte[] { MouseWheelEventKind, (byte)delta, (byte)(delta >> 8), axis });
+    }
+
+    private static byte XButton(uint mouseData) =>
+        (ushort)(mouseData >> 16) == 1 ? (byte)4 : (byte)5;
 
     public void Dispose() => Stop();
 
