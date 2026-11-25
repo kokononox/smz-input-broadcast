@@ -1,0 +1,64 @@
+name: Build full-speed SMZ mirror
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/full-speed-mirror-v1]
+    paths:
+      - "firmware/master_bridge/**"
+      - "windows/MirrorMaster/**"
+      - "docs/full-speed-mirror-v1.fa.md"
+      - ".github/workflows/build-full-speed-mirror.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-master-uf2:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+      - name: Check out Pico SDK
+        uses: actions/checkout@v4
+        with:
+          repository: raspberrypi/pico-sdk
+          ref: 2.3.1
+          path: pico-sdk
+          submodules: recursive
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y gcc-arm-none-eabi libnewlib-arm-none-eabi cmake ninja-build
+      - name: Configure Pico SDK path
+        run: echo "PICO_SDK_PATH=$GITHUB_WORKSPACE/pico-sdk" >> "$GITHUB_ENV"
+      - name: Build Pico master bridge
+        run: |
+          cmake -S firmware/master_bridge -B build/master-bridge -G Ninja -DPICO_BOARD=pico
+          cmake --build build/master-bridge --parallel 2
+      - name: Upload master bridge UF2
+        uses: actions/upload-artifact@v4
+        with:
+          name: SMZ-Mirror-Master-Bridge-UF2
+          path: build/master-bridge/smz_master_bridge.uf2
+          if-no-files-found: error
+          retention-days: 14
+
+  build-windows-app:
+    runs-on: windows-latest
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Publish Windows app
+        run: dotnet publish windows/MirrorMaster/MirrorMaster.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o artifacts/mirror-master
+      - name: Upload Windows app
+        uses: actions/upload-artifact@v4
+        with:
+          name: SMZ-Windows-Mirror-Master
+          path: artifacts/mirror-master/
+          if-no-files-found: error
+          retention-days: 14
