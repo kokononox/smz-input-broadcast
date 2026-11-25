@@ -1,0 +1,27 @@
+cmake_minimum_required(VERSION 3.13)
+
+if(NOT DEFINED ENV{PICO_SDK_PATH})
+    message(FATAL_ERROR "PICO_SDK_PATH must point to a Pico SDK checkout")
+endif()
+
+include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+project(smz_master_bridge C CXX ASM)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+pico_sdk_init()
+
+if(TARGET pico_cxx_options)
+    get_target_property(PICO_CXX_OPTION_SOURCES pico_cxx_options INTERFACE_SOURCES)
+    if(PICO_CXX_OPTION_SOURCES)
+        list(FILTER PICO_CXX_OPTION_SOURCES EXCLUDE REGEX "/new_delete\\.cpp$")
+        set_property(TARGET pico_cxx_options PROPERTY INTERFACE_SOURCES "${PICO_CXX_OPTION_SOURCES}")
+    endif()
+endif()
+
+add_executable(smz_master_bridge master_bridge.c)
+set_property(TARGET smz_master_bridge PROPERTY LINKER_LANGUAGE C)
+target_compile_options(smz_master_bridge PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(smz_master_bridge PRIVATE pico_stdlib hardware_uart)
+pico_enable_stdio_usb(smz_master_bridge 1)
+pico_enable_stdio_uart(smz_master_bridge 0)
+pico_add_extra_outputs(smz_master_bridge)
